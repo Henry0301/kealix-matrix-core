@@ -1,7 +1,7 @@
 import flet as ft
 import asyncio
 from telethon import TelegramClient, functions, errors
-from telethon.sessions import StringSession # Nâng cấp quan trọng nhất
+from telethon.sessions import StringSession 
 import datetime
 import random
 import math
@@ -24,38 +24,57 @@ class CyberPulseApp:
         self.tick = 0 
         self.running = False
         
-        # Lắng nghe sự kiện người dùng đóng tab trình duyệt để tắt tool ngầm
+        # Ngắt tool ngầm khi tắt web
         self.page.on_disconnect = self.handle_disconnect
         
-        self.setup_login_ui()
+        # 1. VẼ NGAY MÀN HÌNH LOADING ĐỂ CHỐNG ĐEN MÀN HÌNH
+        self.loading_text = ft.Text("SYSTEM INITIALIZING...", size=16, weight="bold", color="#00f2ff")
+        self.main_container = ft.Container(
+            content=ft.Column([
+                self.loading_text,
+                ft.ProgressBar(width=200, color="#00f2ff", bgcolor="#111111")
+            ], horizontal_alignment="center", alignment="center"),
+            padding=30, expand=True, alignment=ft.Alignment(0,0)
+        )
+        self.page.add(self.main_container)
+        self.page.update()
+
+        # 2. KHỞI CHẠY LUỒNG KIỂM TRA BỘ NHỚ TRÌNH DUYỆT (CÓ BẢO VỆ)
+        asyncio.create_task(self.startup_routine())
 
     def handle_disconnect(self, e):
-        """Ngắt hệ thống khi người dùng đóng trình duyệt để tiết kiệm RAM Server"""
         self.running = False
         if self.client:
             asyncio.create_task(self.client.disconnect())
-        print(f"User disconnected. Session closed.")
+        print("User disconnected. Task terminated.")
+
+    async def startup_routine(self):
+        """Khởi động trễ để chắc chắn Web đã load xong DOM và WebSocket"""
+        try:
+            await asyncio.sleep(0.5) # Đợi 0.5s cho an toàn tuyệt đối
+            
+            saved_session = None
+            # Kiểm tra xem trình duyệt có hỗ trợ client_storage không
+            if hasattr(self.page, "client_storage"):
+                self.loading_text.value = "CHECKING CLOUD SESSION..."
+                self.page.update()
+                # Phải dùng get_async trong môi trường Web Async
+                saved_session = await self.page.client_storage.get_async("kealix_cloud_session")
+            
+            if saved_session:
+                await self.check_existing_session(saved_session)
+            else:
+                self.show_login_ui()
+                
+        except Exception as e:
+            print(f"Storage Error: {e}")
+            # Nếu bộ nhớ lỗi, vẫn phải hiện màn hình đăng nhập để xài tiếp
+            self.show_login_ui()
 
     # ==========================================
-    # LUỒNG 1: GIAO DIỆN ĐĂNG NHẬP (LƯU SESSION TRÊN TRÌNH DUYỆT)
+    # LUỒNG 1: GIAO DIỆN ĐĂNG NHẬP 
     # ==========================================
-    def setup_login_ui(self):
-        # Lấy session được lưu trong Local Storage của trình duyệt người dùng
-        saved_session = self.page.client_storage.get("kealix_cloud_session")
-        
-        if saved_session:
-            # Hiện màn hình loading
-            self.loading_view = ft.Column([
-                ft.Text("RESTORING CLOUD SESSION...", size=20, weight="bold", color="#00f2ff"),
-                ft.ProgressBar(width=200, color="#00f2ff", bgcolor="#111111")
-            ], horizontal_alignment="center", alignment="center")
-            
-            self.login_container = ft.Container(content=self.loading_view, padding=30, expand=True, alignment=ft.Alignment(0,0))
-            self.page.add(self.login_container)
-            
-            asyncio.create_task(self.check_existing_session(saved_session))
-            return
-
+    def show_login_ui(self):
         # --- UI NHẬP SĐT ---
         self.phone_input = ft.TextField(label="Phone Number (e.g. +84987654321)", bgcolor="#080808", border_color="#333333", color="#00f2ff", focused_border_color="#00f2ff")
         self.phone_submit_btn = ft.ElevatedButton("SEND OTP", bgcolor="#00f2ff", color="black", on_click=self.handle_phone_submit)
@@ -88,31 +107,35 @@ class CyberPulseApp:
             self.otp_error_label 
         ], horizontal_alignment="center", alignment="center", visible=False)
 
+        # Xóa loading và thay bằng form đăng nhập
+        self.page.controls.clear()
         self.login_container = ft.Container(
             content=ft.Column([self.phone_view, self.otp_view], alignment="center"),
             padding=30, expand=True, alignment=ft.Alignment(0,0)
         )
-        
         self.page.add(self.login_container)
+        self.page.update()
 
     # --- LOGIC ĐĂNG NHẬP MULTI-USER ---
     async def connect_client(self, session_str=""):
         if not self.client:
-            # Khởi tạo Client bằng StringSession độc lập cho từng người dùng
             self.client = TelegramClient(StringSession(session_str), API_ID, API_HASH)
         if not self.client.is_connected():
             await self.client.connect()
 
     async def check_existing_session(self, saved_session):
-        await self.connect_client(saved_session)
-        if await self.client.is_user_authorized():
-            self.launch_dashboard() 
-        else:
-            # Xóa session lỗi trên trình duyệt người dùng
-            self.page.client_storage.remove("kealix_cloud_session")
-            self.page.controls.clear()
-            self.setup_login_ui()
-            self.page.update()
+        try:
+            await self.connect_client(saved_session)
+            if await self.client.is_user_authorized():
+                self.show_dashboard_ui() 
+            else:
+                if hasattr(self.page, "client_storage"):
+                    await self.page.client_storage.remove_async("kealix_cloud_session")
+                self.show_login_ui()
+        except:
+            if hasattr(self.page, "client_storage"):
+                await self.page.client_storage.remove_async("kealix_cloud_session")
+            self.show_login_ui()
 
     def handle_phone_submit(self, e):
         self.phone = self.phone_input.value.strip()
@@ -128,7 +151,6 @@ class CyberPulseApp:
 
     async def request_otp(self):
         try:
-            # Khởi tạo session rỗng để chuẩn bị nhận OTP
             await self.connect_client("") 
             sent_code = await self.client.send_code_request(self.phone)
             self.phone_code_hash = sent_code.phone_code_hash
@@ -158,9 +180,9 @@ class CyberPulseApp:
     async def verify_login(self, otp, pwd):
         try:
             await self.client.sign_in(phone=self.phone, code=otp, phone_code_hash=self.phone_code_hash)
-            # LƯU STRING SESSION VÀO TRÌNH DUYỆT NGƯỜI DÙNG KHI ĐĂNG NHẬP THÀNH CÔNG
-            self.page.client_storage.set("kealix_cloud_session", self.client.session.save())
-            self.launch_dashboard()
+            if hasattr(self.page, "client_storage"):
+                await self.page.client_storage.set_async("kealix_cloud_session", self.client.session.save())
+            self.show_dashboard_ui()
         except errors.SessionPasswordNeededError:
             if not pwd:
                 self.otp_error_label.value = "2FA Password is required!"
@@ -169,8 +191,9 @@ class CyberPulseApp:
             else:
                 try:
                     await self.client.sign_in(password=pwd)
-                    self.page.client_storage.set("kealix_cloud_session", self.client.session.save())
-                    self.launch_dashboard()
+                    if hasattr(self.page, "client_storage"):
+                        await self.page.client_storage.set_async("kealix_cloud_session", self.client.session.save())
+                    self.show_dashboard_ui()
                 except Exception as ex2fa:
                     self.otp_error_label.value = f"2FA Error: {ex2fa}"
                     self.otp_submit_btn.text = "VERIFY & LAUNCH CORE"
@@ -181,15 +204,13 @@ class CyberPulseApp:
             self.otp_submit_btn.disabled = False
         self.page.update()
 
-    def launch_dashboard(self):
-        self.login_container.visible = False
-        self.setup_dashboard_ui()
-        self.page.update()
 
     # ==========================================
     # LUỒNG 2: GIAO DIỆN DASHBOARD CHÍNH
     # ==========================================
-    def setup_dashboard_ui(self):
+    def show_dashboard_ui(self):
+        self.page.controls.clear() # Dọn sạch màn hình cũ
+        
         header = ft.Row([
             ft.Text("KAELIX", size=22, weight="bold", color="#ffffff"),
             ft.Text("CORE", size=22, weight="w300", color="#00f2ff"),
@@ -261,8 +282,8 @@ class CyberPulseApp:
             alignment=ft.Alignment(0, 1)
         )
 
-        # Nút Đăng Xuất (Log out)
-        self.logout_btn = ft.TextButton("LOG OUT & WIPE DATA", icon="logout", icon_color="red", on_click=self.logout_user)
+        # Đẩy quá trình đăng xuất vào luồng Async
+        self.logout_btn = ft.TextButton("LOG OUT & WIPE DATA", icon="logout", icon_color="red", on_click=lambda e: asyncio.create_task(self.process_logout()))
 
         self.page.add(
             ft.Column([
@@ -283,15 +304,17 @@ class CyberPulseApp:
                 self.logout_btn
             ], horizontal_alignment="center")
         )
-
-    def logout_user(self, e):
-        """Xóa session khỏi trình duyệt và thoát"""
-        self.running = False
-        self.page.client_storage.remove("kealix_cloud_session")
-        if self.client: asyncio.create_task(self.client.disconnect())
-        self.page.controls.clear()
-        self.setup_login_ui()
         self.page.update()
+
+    async def process_logout(self):
+        """Xóa session khỏi trình duyệt một cách an toàn"""
+        self.running = False
+        if hasattr(self.page, "client_storage"):
+            await self.page.client_storage.remove_async("kealix_cloud_session")
+        if self.client: 
+            await self.client.disconnect()
+            self.client = None
+        self.show_login_ui()
 
     def toggle_setup_menu(self, e):
         self.is_setup_open = not self.is_setup_open
@@ -386,7 +409,7 @@ class CyberPulseApp:
                 
                 await asyncio.sleep(random.randint(45, 75)) 
         except Exception as ex:
-            if self.running: # Chỉ báo lỗi nếu đang chạy (né lỗi khi tab bị đóng)
+            if self.running:
                 self.add_log(f"FATAL ERROR: {ex}", "red")
             self.running = False
             self.page.update()
@@ -410,7 +433,5 @@ async def main(page: ft.Page):
     CyberPulseApp(page)
 
 if __name__ == "__main__":
-    # Cấu hình Cực Kì Quan Trọng để Biến File Python thành Web Server Cloud!
-    # Lấy PORT động từ môi trường Render (Mặc định 8080 nếu chạy local)
     port = int(os.environ.get("PORT", 8080))
     ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=port)
